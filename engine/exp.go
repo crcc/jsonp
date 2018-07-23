@@ -1,0 +1,547 @@
+package engine
+
+import (
+	"errors"
+	"fmt"
+	"strings"
+)
+
+// Value
+type Kind uint8
+
+const (
+	NullValue Kind = iota
+	BooleanValue
+	NumberValue
+	StringValue
+	ListValue
+	MapValue
+	CustomValue
+
+	MapExp
+	ListExp
+	ReducibleExp
+	DelayedExp
+	CustomExp
+)
+
+type Exp interface {
+	Kind() Kind
+	Equal(v Exp) bool
+	String() string
+}
+
+// Null
+type Null struct{}
+
+func (n Null) Kind() Kind {
+	return NullValue
+}
+
+func (n Null) Equal(v Exp) bool {
+	return v.Kind() == NullValue
+}
+
+func (n Null) String() string {
+	return "null"
+}
+
+var nullVal = Null{}
+
+func NewNull() Null {
+	return nullVal
+}
+
+func isNull(v Exp) bool {
+	return v.Kind() == NullValue
+}
+
+// Boolean
+type Boolean bool
+
+func (b Boolean) Kind() Kind {
+	return BooleanValue
+}
+
+func (b Boolean) Equal(v Exp) bool {
+	return v.Kind() == BooleanValue && v.(Boolean) == b
+}
+
+func (b Boolean) String() string {
+	return fmt.Sprint(bool(b))
+}
+
+func NewBoolean(b bool) Boolean {
+	return Boolean(b)
+}
+
+var ErrNotBooleanValue = errors.New("Not Boolean Value")
+
+func ToBoolean(v Exp) (bool, error) {
+	if v.Kind() != BooleanValue {
+		return false, ErrNotBooleanValue
+	}
+
+	return bool(v.(Boolean)), nil
+}
+
+// Number
+type Number float64
+
+func (n Number) Kind() Kind {
+	return NumberValue
+}
+
+func (n Number) Equal(v Exp) bool {
+	return v.Kind() == NumberValue && v.(Number) == n
+}
+
+func (n Number) String() string {
+	return fmt.Sprint(float64(n))
+}
+
+func NewNumber(n float64) Number {
+	return Number(n)
+}
+
+var ErrNotNumberValue = errors.New("Not Number Value")
+
+func ToNumber(v Exp) (float64, error) {
+	if v.Kind() != NumberValue {
+		return 0.0, ErrNotNumberValue
+	}
+
+	return float64(v.(Number)), nil
+}
+
+// String
+type String string
+
+func (s String) Kind() Kind {
+	return StringValue
+}
+
+func (s String) Equal(v Exp) bool {
+	return v.Kind() == StringValue && v.(String) == s
+}
+
+func (s String) String() string {
+	return string(s)
+}
+
+func NewString(s string) String {
+	return String(s)
+}
+
+var ErrNotStringValue = errors.New("Not String Value")
+
+func ToString(v Exp) (string, error) {
+	if v.Kind() != StringValue {
+		return "", ErrNotStringValue
+	}
+	return string(v.(String)), nil
+}
+
+// MapValue
+type Map map[string]Exp
+
+func (m Map) Kind() Kind {
+	return MapValue
+}
+
+func (m Map) Equal(v Exp) bool {
+	return v.Kind() == MapValue && EqualMap(m, v.(Map))
+}
+
+func (m Map) String() string {
+	strs := make([]string, 0, len(m))
+	for name, val := range m {
+		strs = append(strs, name+"="+val.String())
+	}
+	return fmt.Sprintf("{%s}", strings.Join(strs, ", "))
+}
+
+func NewMap(m map[string]Exp) Map {
+	return Map(m)
+}
+
+var ErrNotMapValue = errors.New("Not Map Value")
+
+func ToMap(v Exp) (map[string]Exp, error) {
+	if v.Kind() != MapValue {
+		return nil, ErrNotMapValue
+	}
+
+	return v.(Map), nil
+}
+
+// MapExp
+type MapEx map[string]Exp
+
+func (m MapEx) Kind() Kind {
+	return MapExp
+}
+
+func EqualMap(m, m2 map[string]Exp) bool {
+	if len(m) != len(m2) {
+		return false
+	}
+
+	for name, val := range m {
+		val2, ok := m2[name]
+		if !ok {
+			return false
+		}
+		if !val.Equal(val2) {
+			return false
+		}
+	}
+
+	return true
+}
+
+func (m MapEx) Equal(v Exp) bool {
+	return v.Kind() == MapExp && EqualMap(m, v.(MapEx))
+}
+
+func (m MapEx) String() string {
+	strs := make([]string, 0, len(m))
+	for name, val := range m {
+		strs = append(strs, name+"="+val.String())
+	}
+	return fmt.Sprintf("{%s}", strings.Join(strs, ", "))
+}
+
+func NewMapExp(m map[string]Exp) MapEx {
+	return MapEx(m)
+}
+
+var ErrNotMapExp = errors.New("Not Map Exp")
+
+func ToMapExp(v Exp) (map[string]Exp, error) {
+	if v.Kind() != MapExp {
+		return nil, ErrNotMapExp
+	}
+
+	return v.(MapEx), nil
+}
+
+// ListValue
+type List []Exp
+
+func (l List) Kind() Kind {
+	return ListValue
+}
+
+func (l List) Equal(v Exp) bool {
+	return v.Kind() == ListValue && EqualList(l, v.(List))
+}
+
+func (l List) String() string {
+	strs := make([]string, len(l))
+	for i, val := range l {
+		strs[i] = val.String()
+	}
+	return fmt.Sprintf("[%s]", strings.Join(strs, ", "))
+}
+
+func NewList(list []Exp) List {
+	return List(list)
+}
+
+var ErrNotListValue = errors.New("Not List Value")
+
+func ToList(v Exp) ([]Exp, error) {
+	if v.Kind() != ListValue {
+		return nil, ErrNotListValue
+	}
+
+	return v.(List), nil
+}
+
+// ListExp
+type ListEx []Exp
+
+func (l ListEx) Kind() Kind {
+	return ListExp
+}
+
+func EqualList(l, l2 []Exp) bool {
+	if len(l) != len(l2) {
+		return false
+	}
+
+	for i, val := range l {
+		if !val.Equal(l2[i]) {
+			return false
+		}
+	}
+
+	return true
+}
+
+func (l ListEx) Equal(v Exp) bool {
+	return v.Kind() == ListExp && EqualList(l, v.(ListEx))
+}
+
+func (l ListEx) String() string {
+	strs := make([]string, len(l))
+	for i, val := range l {
+		strs[i] = val.String()
+	}
+	return fmt.Sprintf("[%s]", strings.Join(strs, ", "))
+}
+
+func NewListExp(list []Exp) ListEx {
+	return ListEx(list)
+}
+
+var ErrNotListExp = errors.New("Not List Exp")
+
+func ToListExp(v Exp) ([]Exp, error) {
+	if v.Kind() != ListExp {
+		return nil, ErrNotListExp
+	}
+
+	return v.(ListEx), nil
+}
+
+// CustomValue
+type Tag uint
+
+type CustomVal struct {
+	Tag   Tag
+	Value interface{}
+}
+
+func (v CustomVal) Kind() Kind {
+	return CustomValue
+}
+
+func (v CustomVal) isValue() bool {
+	return true
+}
+
+func EqualCustomVal(v, v2 CustomVal) bool {
+	return v.Tag == v2.Tag &&
+		v.Value == v2.Value
+}
+
+func (v CustomVal) Equal(v2 Exp) bool {
+	return v2.Kind() == CustomValue && EqualCustomVal(v, v2.(CustomVal))
+}
+
+func (v CustomVal) String() string {
+	return fmt.Sprintf("CustomVal{Tag=%d,Value=%v}", uint(v.Tag), v.Value)
+}
+
+func NewCustomValue(tag Tag, val interface{}) CustomVal {
+	return CustomVal{
+		Tag:   tag,
+		Value: val,
+	}
+}
+
+var ErrNotCustomValue = errors.New("Not Custom Value")
+
+func ToCustomValue(v Exp) (CustomVal, error) {
+	if v.Kind() != CustomValue {
+		return CustomVal{}, ErrNotCustomValue
+	}
+
+	return v.(CustomVal), nil
+}
+
+// Redex
+type SuspendType uint8
+
+const (
+	NotSuspend SuspendType = iota
+	Suspend
+	SuspendAll
+)
+
+type Redex struct {
+	Name    string
+	Exp     Exp
+	Suspend SuspendType
+}
+
+func (r Redex) Kind() Kind {
+	return ReducibleExp
+}
+
+func EqualAnchor(r, r2 Redex) bool {
+	return r.Name == r2.Name && r.Exp.Equal(r2.Exp)
+}
+
+func (r Redex) Equal(v Exp) bool {
+	return v.Kind() == ReducibleExp && EqualAnchor(r, v.(Redex))
+}
+
+func (r Redex) String() string {
+	return fmt.Sprintf("Redex{Name=%s,Exp=%s,Suspend=%v}", r.Name, r.Exp.String(), r.Suspend)
+}
+
+func NewRedex(name string, exp Exp) Redex {
+	return Redex{
+		Name: name,
+		Exp:  exp,
+	}
+}
+
+var ErrNotReducibleExp = errors.New("Not Reducible Exp")
+
+func ToRedex(v Exp) (Redex, error) {
+	if v.Kind() != ReducibleExp {
+		return Redex{}, ErrNotReducibleExp
+	}
+
+	return v.(Redex), nil
+}
+
+// CustomExp
+type CustomEx struct {
+	Tag Tag
+	Exp interface{}
+}
+
+func (e CustomEx) Kind() Kind {
+	return CustomExp
+}
+
+func EqualCustomEx(e, e2 CustomEx) bool {
+	return e.Tag == e2.Tag &&
+		e.Exp == e2.Exp
+}
+
+func (e CustomEx) Equal(v Exp) bool {
+	return v.Kind() == CustomExp && EqualCustomEx(e, v.(CustomEx))
+}
+
+func (e CustomEx) String() string {
+	return fmt.Sprintf("CustomVal{Tag=%d,Exp=%v}", uint(e.Tag), e.Exp)
+}
+
+func NewCustomExp(tag Tag, exp interface{}) CustomEx {
+	return CustomEx{
+		Tag: tag,
+		Exp: exp,
+	}
+}
+
+var ErrNotCustomExp = errors.New("Not Custom Exp")
+
+func ToCustomExp(v Exp) (CustomEx, error) {
+	if v.Kind() != CustomExp {
+		return CustomEx{}, ErrNotCustomValue
+	}
+
+	return v.(CustomEx), nil
+}
+
+// DelayedExp
+type DelayedEx struct {
+	Context Context
+	Exp     Exp
+	Env     Env
+}
+
+func (d DelayedEx) Kind() Kind {
+	return DelayedExp
+}
+
+func (d DelayedEx) Equal(v Exp) bool {
+	return false
+}
+
+func (d DelayedEx) String() string {
+	return fmt.Sprintf("DelayedEx{Context=%v,Exp=%v,Env=%v}", d.Context, d.Exp, d.Env)
+}
+
+func NewDelayedExp(ctx Context, exp Exp, env Env) DelayedEx {
+	return DelayedEx{
+		Context: ctx,
+		Exp:     exp,
+		Env:     env,
+	}
+}
+
+var ErrNotDelayedExp = errors.New("Not Delayed Exp")
+
+func ToDelayedExp(v Exp) (DelayedEx, error) {
+	if v.Kind() != DelayedExp {
+		return DelayedEx{}, ErrNotCustomValue
+	}
+
+	return v.(DelayedEx), nil
+}
+
+func IsValue(exp Exp) bool {
+	switch exp.Kind() {
+	case NullValue, BooleanValue, NumberValue,
+		StringValue, ListValue, MapValue, CustomValue:
+		return true
+	case CustomExp, DelayedExp:
+		return false
+	case MapExp:
+		m, err := ToMapExp(exp)
+		if err != nil {
+			panic(err)
+		}
+		for _, subExp := range m {
+			if !IsValue(subExp) {
+				return false
+			}
+		}
+
+		return true
+	case ListExp:
+		l, err := ToListExp(exp)
+		if err != nil {
+			panic(err)
+		}
+		for _, subExp := range l {
+			if !IsValue(subExp) {
+				return false
+			}
+		}
+
+		return true
+	case ReducibleExp:
+		r, err := ToRedex(exp)
+		if err != nil {
+			panic(err)
+		}
+		switch r.Suspend {
+		case NotSuspend:
+			return false
+		case SuspendAll:
+			return true
+		case Suspend:
+			return IsValue(r.Exp)
+		default:
+			panic(fmt.Sprintf("unknown suspend type: %d", r.Suspend))
+		}
+	default:
+		panic(fmt.Sprintf("unknown Exp Kind: %d", exp.Kind()))
+	}
+}
+
+func IsSimpleValue(exp Exp) bool {
+	switch exp.Kind() {
+	case NullValue, BooleanValue, NumberValue,
+		StringValue, ListValue, MapValue, CustomValue:
+		return true
+	case MapExp, ListExp, CustomExp, DelayedExp:
+		return false
+	case ReducibleExp:
+		r, err := ToRedex(exp)
+		if err != nil {
+			panic(err)
+		}
+		return r.Suspend == SuspendAll
+	default:
+		panic(fmt.Sprintf("unknown Exp Kind: %d", exp.Kind()))
+	}
+}
