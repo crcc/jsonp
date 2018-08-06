@@ -16,13 +16,15 @@ const (
 	StringValue
 	ListValue
 	MapValue
-	CustomValue
+
+	SuspendValue
 
 	MapExp
 	ListExp
 	ReducibleExp
+
+	SuspendExp
 	DelayedExp
-	CustomExp
 )
 
 type Exp interface {
@@ -52,7 +54,7 @@ func NewNull() Null {
 	return nullVal
 }
 
-func isNull(v Exp) bool {
+func IsNull(v Exp) bool {
 	return v.Kind() == NullValue
 }
 
@@ -156,7 +158,7 @@ func (m Map) Equal(v Exp) bool {
 func (m Map) String() string {
 	strs := make([]string, 0, len(m))
 	for name, val := range m {
-		strs = append(strs, name+"="+val.String())
+		strs = append(strs, fmt.Sprintf("%q: %s", name, val.String()))
 	}
 	return fmt.Sprintf("{%s}", strings.Join(strs, ", "))
 }
@@ -207,7 +209,7 @@ func (m MapEx) Equal(v Exp) bool {
 func (m MapEx) String() string {
 	strs := make([]string, 0, len(m))
 	for name, val := range m {
-		strs = append(strs, name+"="+val.String())
+		strs = append(strs, fmt.Sprintf("%q: %s", name, val.String()))
 	}
 	return fmt.Sprintf("{%s}", strings.Join(strs, ", "))
 }
@@ -306,81 +308,59 @@ func ToListExp(v Exp) ([]Exp, error) {
 	return v.(ListEx), nil
 }
 
-// CustomValue
-type Tag uint
+// SuspendValue
+type SuspendVal Redex
 
-type CustomVal struct {
-	Tag   Tag
-	Value interface{}
+func (s SuspendVal) Kind() Kind {
+	return SuspendValue
 }
 
-func (v CustomVal) Kind() Kind {
-	return CustomValue
+func (s SuspendVal) Equal(v Exp) bool {
+	return v.Kind() == SuspendValue && EqualRedex(Redex(s), Redex(v.(SuspendVal)))
 }
 
-func (v CustomVal) isValue() bool {
-	return true
+func (s SuspendVal) String() string {
+	return fmt.Sprintf(`{"data": %s}`, Redex(s).String())
 }
 
-func EqualCustomVal(v, v2 CustomVal) bool {
-	return v.Tag == v2.Tag &&
-		v.Value == v2.Value
+func NewSuspendValue(r Redex) SuspendVal {
+	return SuspendVal(r)
 }
 
-func (v CustomVal) Equal(v2 Exp) bool {
-	return v2.Kind() == CustomValue && EqualCustomVal(v, v2.(CustomVal))
-}
+var ErrNotSuspendValue = errors.New("Not Suspend Value")
 
-func (v CustomVal) String() string {
-	return fmt.Sprintf("CustomVal{Tag=%d,Value=%v}", uint(v.Tag), v.Value)
-}
-
-func NewCustomValue(tag Tag, val interface{}) CustomVal {
-	return CustomVal{
-		Tag:   tag,
-		Value: val,
-	}
-}
-
-var ErrNotCustomValue = errors.New("Not Custom Value")
-
-func ToCustomValue(v Exp) (CustomVal, error) {
-	if v.Kind() != CustomValue {
-		return CustomVal{}, ErrNotCustomValue
+func ToSuspendValue(v Exp) (SuspendVal, error) {
+	if v.Kind() != SuspendValue {
+		return SuspendVal{}, ErrNotSuspendValue
 	}
 
-	return v.(CustomVal), nil
+	return v.(SuspendVal), nil
+}
+
+func UnsuspendValue(s SuspendVal) Redex {
+	return Redex(s)
 }
 
 // Redex
-type SuspendType uint8
-
-const (
-	NotSuspend SuspendType = iota
-	Suspend
-	SuspendAll
-)
-
 type Redex struct {
-	Name    string
-	Exp     Exp
-	Suspend SuspendType
+	Name string
+	Exp  Exp
 }
 
 func (r Redex) Kind() Kind {
 	return ReducibleExp
 }
 
-func EqualAnchor(r, r2 Redex) bool {
+func EqualRedex(r, r2 Redex) bool {
 	return r.Name == r2.Name && r.Exp.Equal(r2.Exp)
 }
 
 func (r Redex) Equal(v Exp) bool {
-	return v.Kind() == ReducibleExp && EqualAnchor(r, v.(Redex))
+	return v.Kind() == ReducibleExp && EqualRedex(r, v.(Redex))
 }
 
 func (r Redex) String() string {
-	return fmt.Sprintf("Redex{Name=%s,Exp=%s,Suspend=%v}", r.Name, r.Exp.String(), r.Suspend)
+	return fmt.Sprintf(`{%q: %s}`, r.Name, r.Exp.String())
 }
 
 func NewRedex(name string, exp Exp) Redex {
@@ -400,46 +380,6 @@ func ToRedex(v Exp) (Redex, error) {
 	return v.(Redex), nil
 }
 
-// CustomExp
-type CustomEx struct {
-	Tag Tag
-	Exp interface{}
-}
-
-func (e CustomEx) Kind() Kind {
-	return CustomExp
-}
-
-func EqualCustomEx(e, e2 CustomEx) bool {
-	return e.Tag == e2.Tag &&
-		e.Exp == e2.Exp
-}
-
-func (e CustomEx) Equal(v Exp) bool {
-	return v.Kind() == CustomExp && EqualCustomEx(e, v.(CustomEx))
-}
-
-func (e CustomEx) String() string {
-	return fmt.Sprintf("CustomVal{Tag=%d,Exp=%v}", uint(e.Tag), e.Exp)
-}
-
-func NewCustomExp(tag Tag, exp interface{}) CustomEx {
-	return CustomEx{
-		Tag: tag,
-		Exp: exp,
-	}
-}
-
-var ErrNotCustomExp = errors.New("Not Custom Exp")
-
-func ToCustomExp(v Exp) (CustomEx, error) {
-	if v.Kind() != CustomExp {
-		return CustomEx{}, ErrNotCustomValue
-	}
-
-	return v.(CustomEx), nil
-}
-
 // DelayedExp
 type DelayedEx struct {
 	Context Context
@@ -456,7 +396,7 @@ func (d DelayedEx) Equal(v Exp) bool {
 }
 
 func (d DelayedEx) String() string {
-	return fmt.Sprintf("DelayedEx{Context=%v,Exp=%v,Env=%v}", d.Context, d.Exp, d.Env)
+	return fmt.Sprintf(`{"delayed": %s}`, d.Exp.String())
 }
 
 func NewDelayedExp(ctx Context, exp Exp, env Env) DelayedEx {
@@ -471,18 +411,48 @@ var ErrNotDelayedExp = errors.New("Not Delayed Exp")
 
 func ToDelayedExp(v Exp) (DelayedEx, error) {
 	if v.Kind() != DelayedExp {
-		return DelayedEx{}, ErrNotCustomValue
+		return DelayedEx{}, ErrNotDelayedExp
 	}
 
 	return v.(DelayedEx), nil
 }
 
+// SuspendExp
+type SuspendEx Redex
+
+func (s SuspendEx) Kind() Kind {
+	return SuspendExp
+}
+
+func (s SuspendEx) Equal(v Exp) bool {
+	return v.Kind() == SuspendExp && EqualRedex(Redex(s), Redex(v.(SuspendEx)))
+}
+
+func (s SuspendEx) String() string {
+	return fmt.Sprintf(`{"suspend": %s}`, Redex(s))
+}
+
+func NewSuspendExp(r Redex) SuspendEx {
+	return SuspendEx(r)
+}
+
+var ErrNotSuspendExp = errors.New("Not Suspend Exp")
+
+func ToSuspendExp(v Exp) (SuspendEx, error) {
+	if v.Kind() != SuspendExp {
+		return SuspendEx{}, ErrNotSuspendExp
+	}
+
+	return v.(SuspendEx), nil
+}
+
+func UnsuspendExp(s SuspendEx) Redex {
+	return Redex(s)
+}
+
 func IsValue(exp Exp) bool {
 	switch exp.Kind() {
-	case NullValue, BooleanValue, NumberValue,
-		StringValue, ListValue, MapValue, CustomValue:
-		return true
-	case CustomExp, DelayedExp:
+	case DelayedExp:
 		return false
 	case MapExp:
 		m, err := ToMapExp(exp)
@@ -508,40 +478,24 @@ func IsValue(exp Exp) bool {
 		}
 
 		return true
-	case ReducibleExp:
-		r, err := ToRedex(exp)
+	case SuspendExp:
+		s, err := ToSuspendExp(exp)
 		if err != nil {
 			panic(err)
 		}
-		switch r.Suspend {
-		case NotSuspend:
-			return false
-		case SuspendAll:
-			return true
-		case Suspend:
-			return IsValue(r.Exp)
-		default:
-			panic(fmt.Sprintf("unknown suspend type: %d", r.Suspend))
-		}
+		return IsValue(s.Exp)
+	case ReducibleExp:
+		return false
 	default:
-		panic(fmt.Sprintf("unknown Exp Kind: %d", exp.Kind()))
+		return true
 	}
 }
 
 func IsSimpleValue(exp Exp) bool {
 	switch exp.Kind() {
-	case NullValue, BooleanValue, NumberValue,
-		StringValue, ListValue, MapValue, CustomValue:
-		return true
-	case MapExp, ListExp, CustomExp, DelayedExp:
+	case MapExp, ListExp, DelayedExp, ReducibleExp, SuspendExp:
 		return false
-	case ReducibleExp:
-		r, err := ToRedex(exp)
-		if err != nil {
-			panic(err)
-		}
-		return r.Suspend == SuspendAll
 	default:
-		panic(fmt.Sprintf("unknown Exp Kind: %d", exp.Kind()))
+		return true
 	}
 }

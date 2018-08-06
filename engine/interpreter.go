@@ -7,13 +7,22 @@ import (
 
 var (
 	ErrUnhandledRedex          = errors.New("Unhandled Redex")
-	ErrExposedCustomExp        = errors.New("Exposed Custom Exp")
 	ErrCannotSuspendDelayedExp = errors.New("Cannot Suspend Delayed Exp")
 )
 
+type InfoExtracter interface {
+	ExtractInfo(fromCtx, toCtx Context, fromEnv, toEnv Env) error
+}
+
+type InfoExtracterFunc func(ctx Context, env Env) (Context, Env, error)
+
+func (f InfoExtracterFunc) ExtractInfo(ctx Context, env Env) (Context, Env, error) {
+	return f(ctx, env)
+}
+
 type Interpreter interface {
 	Interpret(ctx Context, exp Exp, env Env) (Exp, error)
-	ExtractInfo(fromCtx, toCtx Context) error
+	InfoExtracter
 }
 
 type RedexInterpreter interface {
@@ -29,44 +38,72 @@ func (f RedexInterpreterFunc) RedexInterpret(ctx Context, interp Interpreter, ex
 type ExtensibleInterpreter interface {
 	Interpreter
 	RegisterInterpreter(name string, interpreter RedexInterpreter) RedexInterpreter
-	RegisterInfoExtracter(f func(fromCtx, toCtx Context) error) func(fromCtx, toCtx Context) error
+	RegisterInfoExtracter(extracter InfoExtracter) InfoExtracter
 }
 
-func SuspendExp(exp Exp, suspend bool) error {
+func Suspend(exp Exp, suspend bool) (Exp, error) {
 	switch exp.Kind() {
-	case NullValue, BooleanValue, NumberValue, StringValue,
-		ListValue, MapValue, CustomValue:
-	case CustomExp:
-		return ErrExposedCustomExp
 	case DelayedExp:
-		return ErrCannotSuspendDelayedExp
-	case MapExp:
-		m, _ := ToMap(exp)
-		for _, subExp := range m {
-			if err := SuspendExp(subExp, suspend); err != nil {
-				return err
+		return nil, ErrCannotSuspendDelayedExp
+	case SuspendValue:
+		if !suspend {
+			s, err := ToSuspendValue(exp)
+			if err != nil {
+				return nil, err
 			}
+			return UnsuspendValue(s), nil
 		}
-	case ListExp:
-		l, _ := ToList(exp)
-		for _, subExp := range l {
-			if err := SuspendExp(subExp, suspend); err != nil {
-				return err
-			}
+		return exp, nil
+	case SuspendExp:
+		s, err := ToSuspendExp(exp)
+		if err != nil {
+			return nil, err
 		}
-	case ReducibleExp:
-		r, _ := ToRedex(exp)
+		r := UnsuspendExp(s)
 		if suspend {
-			r.Suspend = SuspendAll
+			return NewSuspendValue(r), nil
 		} else {
-			r.Suspend = NotSuspend
-			if err := SuspendExp(r.Exp, suspend); err != nil {
-				return err
-			}
+			return r, nil
 		}
+	case MapExp:
+		m, err := ToMap(exp)
+		if err != nil {
+			return nil, err
+		}
+		for key, subExp := range m {
+			newExp, err := Suspend(subExp, suspend)
+			if err != nil {
+				return nil, err
+			}
+			m[key] = newExp
+		}
+		return NewMapExp(m), nil
+	case ListExp:
+		l, err := ToList(exp)
+		if err != nil {
+			return nil, err
+		}
+		for i, subExp := range l {
+			newExp, err := Suspend(subExp, suspend)
+			if err != nil {
+				return nil, err
+			}
+			l[i] = newExp
+		}
+		return NewListExp(l), nil
+	case ReducibleExp:
+		if suspend {
+			r, err := ToRedex(exp)
+			if err != nil {
+				return nil, err
+			}
+			return NewSuspendValue(r), nil
+		} else {
+			return exp, nil
+		}
+	default:
+		return exp, nil
 	}
-
-	return nil
 }
 
 // Identity
@@ -78,323 +115,256 @@ func (id IdentityInterpreter) Interpret(ctx Context, exp Exp, env Env) (Exp, err
 	return exp, nil
 }
 
-func (id IdentityInterpreter) ExtractInfo(fromCtx, toCtx Context) error {
+func (id IdentityInterpreter) ExtractInfo(fromCtx, toCtx Context, fromEnv, toEnv Env) error {
 	return nil
+}
+
+// Abstract
+
+type InnerInterpreter func(ctx Context, exp Exp, env Env) (Exp, bool, error)
+
+type RedexEvaluator interface {
+	InterpretRedex(redexInterp RedexInterpreter, interp InnerInterpreter, ctx Context, r Redex, env Env) (Exp, bool, error)
+}
+
+type RedexEvaluatorFunc func(interp RedexInterpreter, ctx Context, r Redex, env Env) (Exp, bool, error)
+
+func (f RedexEvaluatorFunc) InterpretRedex(interp RedexInterpreter, ctx Context, r Redex, env Env) (Exp, bool, error) {
+	return f(interp, ctx, r, env)
+}
+
+func NewAbstractInterpreter(eval RedexEvaluator) AbstractInterpreter {
+	return AbstractInterpreter{
+		redexInterpreters: make(map[string]RedexInterpreter),
+		redexEvaluator:    eval,
+	}
+}
+
+type AbstractInterpreter struct {
+	redexInterpreters map[string]RedexInterpreter
+	extracter         InfoExtracter
+	redexEvaluator    RedexEvaluator
+}
+
+func (interp *AbstractInterpreter) interpretMap(ctx Context, m Map, env Env) (Exp, bool, error) {
+	newM := make(map[string]Exp, len(m))
+	hasExpanded := false
+	for key, subExp := range m {
+		newExp, expanded, err := interp.interpret(ctx, subExp, env)
+		if err != nil {
+			return nil, false, err
+		}
+		newM[key] = newExp
+		hasExpanded = hasExpanded || expanded
+	}
+	return NewMap(newM), hasExpanded, nil
+}
+
+func (interp *AbstractInterpreter) interpretList(ctx Context, l List, env Env) (Exp, bool, error) {
+	newL := make([]Exp, len(l))
+	hasExpanded := false
+	for i, subExp := range l {
+		newExp, expanded, err := interp.interpret(ctx, subExp, env)
+		if err != nil {
+			return nil, false, err
+		}
+		newL[i] = newExp
+		hasExpanded = hasExpanded || expanded
+	}
+	return NewList(newL), hasExpanded, nil
+}
+
+func (interp *AbstractInterpreter) interpretSuspendExp(ctx Context, s SuspendEx, env Env) (Exp, bool, error) {
+	newExp, expanded, err := interp.interpret(ctx, s.Exp, env)
+	if err != nil {
+		return nil, false, err
+	}
+
+	newS := s
+	newS.Exp = newExp
+
+	return newS, expanded, nil
+}
+
+// bool: expanded
+func (interp *AbstractInterpreter) interpret(ctx Context, exp Exp, env Env) (Exp, bool, error) {
+	e := exp
+	expanded := true
+	for expanded {
+		// fmt.Println("interpret", e)
+		var interpErr error
+		switch e.Kind() {
+		case NullValue, BooleanValue, NumberValue, StringValue,
+			ListValue, MapValue, SuspendValue:
+			return e, false, nil
+			// return interp.interpreter.Interpret(ctx, exp, env)
+		case MapExp:
+			m, err := ToMap(e)
+			if err != nil {
+				return nil, false, err
+			}
+			e, expanded, interpErr = interp.interpretMap(ctx, m, env)
+		case ListExp:
+			l, err := ToList(e)
+			if err != nil {
+				return nil, false, err
+			}
+			e, expanded, interpErr = interp.interpretList(ctx, l, env)
+		case SuspendExp:
+			s, err := ToSuspendExp(e)
+			if err != nil {
+				return nil, false, err
+			}
+			e, expanded, interpErr = interp.interpretSuspendExp(ctx, s, env)
+		case DelayedExp:
+			d, err := ToDelayedExp(e)
+			if err != nil {
+				return nil, false, err
+			}
+			ctx, e, env = d.Context, d.Exp, d.Env
+			expanded, interpErr = true, nil
+		case ReducibleExp:
+			r, err := ToRedex(e)
+			if err != nil {
+				return nil, false, err
+			}
+			redexInterp := interp.redexInterpreters[r.Name]
+			e, expanded, interpErr = interp.redexEvaluator.InterpretRedex(redexInterp, interp.interpret, ctx, r, env)
+		default:
+			panic(fmt.Sprintf("unknown Exp Kind: %v, exp: %s", exp.Kind(), exp.String()))
+		}
+
+		if interpErr != nil {
+			return nil, false, interpErr
+		}
+	}
+
+	return e, false, nil
+}
+
+func (interp *AbstractInterpreter) Interpret(ctx Context, exp Exp, env Env) (Exp, error) {
+	newExp, _, err := interp.interpret(ctx, exp, env)
+	return newExp, err
+}
+
+func (interp *AbstractInterpreter) ExtractInfo(fromCtx, toCtx Context, fromEnv, toEnv Env) error {
+	if interp.extracter == nil {
+		return nil
+	}
+	return interp.extracter.ExtractInfo(fromCtx, toCtx, fromEnv, toEnv)
+}
+
+func (interp *AbstractInterpreter) RegisterInterpreter(name string, interpreter RedexInterpreter) RedexInterpreter {
+	oldInterp := interp.redexInterpreters[name]
+	if interpreter == nil {
+		delete(interp.redexInterpreters, name)
+		return oldInterp
+	}
+	interp.redexInterpreters[name] = interpreter
+	return oldInterp
+}
+
+func (interp *AbstractInterpreter) RegisterInfoExtracter(extracter InfoExtracter) InfoExtracter {
+	oldExtracter := interp.extracter
+	interp.extracter = extracter
+	return oldExtracter
 }
 
 // Application Order
 func NewApplicationOrderInterpreter(fallback bool) ExtensibleInterpreter {
-	return &ApplicationOrderInterpreter{
-		redexInterpreters: make(map[string]RedexInterpreter),
-		fallback:          fallback,
+	result := &ApplicationOrderInterpreter{
+		fallback: fallback,
 	}
+
+	result.AbstractInterpreter = NewAbstractInterpreter(result)
+	return result
 }
 
 type ApplicationOrderInterpreter struct {
-	redexInterpreters map[string]RedexInterpreter
-	extractInfo       func(fromCtx, toCtx Context) error
-	fallback          bool
+	AbstractInterpreter
+	fallback bool
 }
 
-func (interp *ApplicationOrderInterpreter) interpretRedex(ctx Context, r Redex, env Env) (Exp, bool, error) {
-	switch r.Suspend {
-	case SuspendAll:
-		return r, false, nil
-	case Suspend:
-		newExp, expanded, err := interp.interpret(ctx, r.Exp, env)
-		if err != nil {
-			return nil, false, err
-		}
+func (interp *ApplicationOrderInterpreter) InterpretRedex(redexInterp RedexInterpreter, interpret InnerInterpreter, ctx Context, r Redex, env Env) (Exp, bool, error) {
+	if redexInterp == nil && !interp.fallback {
+		return nil, false, ErrUnhandledRedex
+	}
 
+	newExp, expanded, err := interpret(ctx, r.Exp, env)
+	if err != nil {
+		return nil, false, err
+	}
+
+	if redexInterp == nil && interp.fallback {
 		newR := r
 		newR.Exp = newExp
-
-		return newR, expanded, nil
-	case NotSuspend:
-		redexInterp, ok := interp.redexInterpreters[r.Name]
-		if !ok && !interp.fallback {
-			return nil, false, ErrUnhandledRedex
-		}
-
-		newExp, expanded, err := interp.interpret(ctx, r.Exp, env)
-		if err != nil {
-			return nil, false, err
-		}
-
-		if !ok && interp.fallback {
-			newR := r
-			newR.Exp = newExp
-			newR.Suspend = Suspend
-			return newR, expanded, nil
-		}
-		newExp2, err := redexInterp.RedexInterpret(ctx, interp, newExp, env)
-		if err != nil {
-			return nil, false, err
-		}
-		return newExp2, true, nil
-	default:
-		panic(fmt.Sprintf("unknwon suspend type: %d", r.Suspend))
+		return NewSuspendValue(newR), expanded, nil
 	}
-}
-
-func (interp *ApplicationOrderInterpreter) interpretMap(ctx Context, m Map, env Env) (Exp, bool, error) {
-	newM := make(map[string]Exp, len(m))
-	hasExpanded := false
-	for key, subExp := range m {
-		newExp, expanded, err := interp.interpret(ctx, subExp, env)
-		if err != nil {
-			return nil, false, err
-		}
-		newM[key] = newExp
-		hasExpanded = hasExpanded || expanded
+	newExp2, err := redexInterp.RedexInterpret(ctx, interp, newExp, env)
+	if err != nil {
+		return nil, false, err
 	}
-	return NewMap(newM), hasExpanded, nil
-}
-
-func (interp *ApplicationOrderInterpreter) interpretList(ctx Context, l List, env Env) (Exp, bool, error) {
-	newL := make([]Exp, len(l))
-	hasExpanded := false
-	for i, subExp := range l {
-		newExp, expanded, err := interp.interpret(ctx, subExp, env)
-		if err != nil {
-			return nil, false, err
-		}
-		newL[i] = newExp
-		hasExpanded = hasExpanded || expanded
-	}
-	return NewList(newL), hasExpanded, nil
-}
-
-// bool: expanded
-func (interp *ApplicationOrderInterpreter) interpret(ctx Context, exp Exp, env Env) (Exp, bool, error) {
-	e := exp
-	expanded := true
-	for expanded {
-		var interpErr error
-		switch e.Kind() {
-		case NullValue, BooleanValue, NumberValue, StringValue,
-			ListValue, MapValue, CustomValue:
-			return e, false, nil
-			// return interp.interpreter.Interpret(ctx, exp, env)
-		case CustomExp:
-			return nil, false, ErrExposedCustomExp
-		case MapExp:
-			m, err := ToMap(e)
-			if err != nil {
-				return nil, false, err
-			}
-			e, expanded, interpErr = interp.interpretMap(ctx, m, env)
-		case ListExp:
-			l, err := ToList(e)
-			if err != nil {
-				return nil, false, err
-			}
-			e, expanded, interpErr = interp.interpretList(ctx, l, env)
-		case DelayedExp:
-			d, err := ToDelayedExp(e)
-			if err != nil {
-				return nil, false, err
-			}
-			e, expanded, interpErr = interp.interpret(d.Context, d.Exp, d.Env)
-		case ReducibleExp:
-			r, err := ToRedex(e)
-			if err != nil {
-				return nil, false, err
-			}
-			e, expanded, interpErr = interp.interpretRedex(ctx, r, env)
-		default:
-			panic(fmt.Sprintf("unknown Exp Kind: %v, exp: %s", exp.Kind(), exp.String()))
-		}
-
-		if interpErr != nil {
-			return nil, false, interpErr
-		}
-	}
-
-	return e, false, nil
-}
-
-func (interp *ApplicationOrderInterpreter) Interpret(ctx Context, exp Exp, env Env) (Exp, error) {
-	newExp, _, err := interp.interpret(ctx, exp, env)
-	return newExp, err
-}
-
-func (interp *ApplicationOrderInterpreter) ExtractInfo(fromCtx Context, toCtx Context) error {
-	if interp.extractInfo == nil {
-		return nil
-	}
-	return interp.extractInfo(fromCtx, toCtx)
-}
-
-func (interp *ApplicationOrderInterpreter) RegisterInterpreter(name string, interpreter RedexInterpreter) RedexInterpreter {
-	oldInterp := interp.redexInterpreters[name]
-	if interpreter == nil {
-		delete(interp.redexInterpreters, name)
-		return oldInterp
-	}
-	interp.redexInterpreters[name] = interpreter
-	return oldInterp
-}
-
-func (interp *ApplicationOrderInterpreter) RegisterInfoExtracter(f func(fromCtx, toCtx Context) error) func(fromCtx, toCtx Context) error {
-	oldExtractInfo := interp.extractInfo
-	interp.extractInfo = f
-	return oldExtractInfo
+	return newExp2, true, nil
 }
 
 // Normal Order
 func NewNormalOrderInterpreter(fallback bool) ExtensibleInterpreter {
-	return &NormalOrderInterpreter{
-		redexInterpreters: make(map[string]RedexInterpreter),
-		fallback:          fallback,
+	result := &NormalOrderInterpreter{
+		fallback: fallback,
 	}
+	result.AbstractInterpreter = NewAbstractInterpreter(result)
+	return result
 }
 
 type NormalOrderInterpreter struct {
-	redexInterpreters map[string]RedexInterpreter
-	extractInfo       func(fromCtx, toCtx Context) error
-	fallback          bool
+	AbstractInterpreter
+	fallback bool
 }
 
-func (interp *NormalOrderInterpreter) interpretRedex(ctx Context, r Redex, env Env) (Exp, bool, error) {
-	switch r.Suspend {
-	case SuspendAll:
-		return r, false, nil
-	case Suspend:
-		newExp, expanded, err := interp.interpret(ctx, r.Exp, env)
+func (interp *NormalOrderInterpreter) InterpretRedex(redexInterp RedexInterpreter, interpret InnerInterpreter, ctx Context, r Redex, env Env) (Exp, bool, error) {
+	if redexInterp == nil {
+		if interp.fallback {
+			return NewSuspendValue(r), false, nil
+		}
+		return nil, false, ErrUnhandledRedex
+	}
+
+	newExp, err := redexInterp.RedexInterpret(ctx, interp, r.Exp, env)
+	if err != nil {
+		return nil, false, err
+	}
+	return newExp, true, nil
+}
+
+// Layered
+
+func NewLayeredInterpreter(interp Interpreter) ExtensibleInterpreter {
+	result := &LayeredInterpreter{
+		innerInterpreter: interp,
+	}
+	result.AbstractInterpreter = NewAbstractInterpreter(result)
+	return result
+}
+
+type LayeredInterpreter struct {
+	AbstractInterpreter
+	innerInterpreter Interpreter
+}
+
+func (interp *LayeredInterpreter) InterpretRedex(redexInterp RedexInterpreter, interpret InnerInterpreter, ctx Context, r Redex, env Env) (Exp, bool, error) {
+	if redexInterp == nil {
+		newExp, err := interp.innerInterpreter.Interpret(ctx, r, env)
 		if err != nil {
 			return nil, false, err
 		}
-
-		newR := r
-		newR.Exp = newExp
-
-		return newR, expanded, nil
-	case NotSuspend:
-		redexInterp, ok := interp.redexInterpreters[r.Name]
-		if !ok {
-			if interp.fallback {
-				newR := r
-				newR.Suspend = SuspendAll
-				return newR, false, nil
-			}
-			return nil, false, ErrUnhandledRedex
-		}
-
-		newExp, err := redexInterp.RedexInterpret(ctx, interp, r.Exp, env)
-		if err != nil {
-			return nil, false, err
-		}
-		return newExp, true, nil
-	default:
-		panic(fmt.Sprintf("unknwon suspend type: %d", r.Suspend))
-	}
-}
-
-func (interp *NormalOrderInterpreter) interpretMap(ctx Context, m Map, env Env) (Exp, bool, error) {
-	newM := make(map[string]Exp, len(m))
-	hasExpanded := false
-	for key, subExp := range m {
-		newExp, expanded, err := interp.interpret(ctx, subExp, env)
-		if err != nil {
-			return nil, false, err
-		}
-		newM[key] = newExp
-		hasExpanded = hasExpanded || expanded
-	}
-	return NewMap(newM), hasExpanded, nil
-}
-
-func (interp *NormalOrderInterpreter) interpretList(ctx Context, l List, env Env) (Exp, bool, error) {
-	newL := make([]Exp, len(l))
-	hasExpanded := false
-	for i, subExp := range l {
-		newExp, expanded, err := interp.interpret(ctx, subExp, env)
-		if err != nil {
-			return nil, false, err
-		}
-		newL[i] = newExp
-		hasExpanded = hasExpanded || expanded
-	}
-	return NewList(newL), hasExpanded, nil
-}
-
-// bool: expanded
-func (interp *NormalOrderInterpreter) interpret(ctx Context, exp Exp, env Env) (Exp, bool, error) {
-	e := exp
-	expanded := true
-	for expanded {
-		fmt.Println("normal", e)
-		var interpErr error
-		switch e.Kind() {
-		case NullValue, BooleanValue, NumberValue, StringValue,
-			ListValue, MapValue, CustomValue:
-			return e, false, nil
-			// return interp.interpreter.Interpret(ctx, exp, env)
-		case CustomExp:
-			return nil, false, ErrExposedCustomExp
-		case MapExp:
-			m, err := ToMap(e)
-			if err != nil {
-				return nil, false, err
-			}
-			e, expanded, interpErr = interp.interpretMap(ctx, m, env)
-		case ListExp:
-			l, err := ToList(e)
-			if err != nil {
-				return nil, false, err
-			}
-			e, expanded, interpErr = interp.interpretList(ctx, l, env)
-		case DelayedExp:
-			d, err := ToDelayedExp(e)
-			if err != nil {
-				return nil, false, err
-			}
-			e, expanded, interpErr = interp.interpret(d.Context, d.Exp, d.Env)
-		case ReducibleExp:
-			r, err := ToRedex(e)
-			if err != nil {
-				return nil, false, err
-			}
-			e, expanded, interpErr = interp.interpretRedex(ctx, r, env)
-		default:
-			panic(fmt.Sprintf("unknown Exp Kind: %v, exp: %s", exp.Kind(), exp.String()))
-		}
-
-		if interpErr != nil {
-			return nil, false, interpErr
-		}
+		return newExp, false, nil
 	}
 
-	return e, false, nil
-}
-
-func (interp *NormalOrderInterpreter) Interpret(ctx Context, exp Exp, env Env) (Exp, error) {
-	newExp, _, err := interp.interpret(ctx, exp, env)
-	return newExp, err
-}
-
-func (interp *NormalOrderInterpreter) ExtractInfo(fromCtx Context, toCtx Context) error {
-	if interp.extractInfo == nil {
-		return nil
+	newExp, err := redexInterp.RedexInterpret(ctx, interp, r.Exp, env)
+	if err != nil {
+		return nil, false, err
 	}
-	return interp.extractInfo(fromCtx, toCtx)
-}
-
-func (interp *NormalOrderInterpreter) RegisterInterpreter(name string, interpreter RedexInterpreter) RedexInterpreter {
-	oldInterp := interp.redexInterpreters[name]
-	if interpreter == nil {
-		delete(interp.redexInterpreters, name)
-		return oldInterp
-	}
-	interp.redexInterpreters[name] = interpreter
-	return oldInterp
-}
-
-func (interp *NormalOrderInterpreter) RegisterInfoExtracter(f func(fromCtx, toCtx Context) error) func(fromCtx, toCtx Context) error {
-	oldExtractInfo := interp.extractInfo
-	interp.extractInfo = f
-	return oldExtractInfo
+	return newExp, true, nil
 }
 
 // Chain
@@ -424,6 +394,7 @@ type ChainInterpreter struct {
 	second Interpreter
 }
 
+// context, environment: copy, use, extract into old
 func (chain *ChainInterpreter) Interpret(ctx Context, exp Exp, env Env) (Exp, error) {
 	// if exp.isValue() {
 	// 	return exp, nil
@@ -432,24 +403,25 @@ func (chain *ChainInterpreter) Interpret(ctx Context, exp Exp, env Env) (Exp, er
 	newCtx := ctx.Protect()
 	newEnv := env.Protect()
 
-	newExp, err := chain.first.Interpret(newCtx, exp, newEnv)
+	newVal, err := chain.first.Interpret(newCtx, exp, newEnv)
 	if err != nil {
 		return nil, err
 	}
 
-	if err := chain.first.ExtractInfo(newCtx, ctx); err != nil {
+	if err := chain.first.ExtractInfo(newCtx, ctx, newEnv, env); err != nil {
 		return nil, err
 	}
 
-	if err := SuspendExp(newExp, false); err != nil {
+	newExp, err := Suspend(newVal, false)
+	if err != nil {
 		return nil, err
 	}
 
 	return chain.second.Interpret(ctx, newExp, env)
 }
 
-func (chain *ChainInterpreter) ExtractInfo(fromCtx, toCtx Context) error {
-	return chain.second.ExtractInfo(fromCtx, toCtx)
+func (chain *ChainInterpreter) ExtractInfo(fromCtx, toCtx Context, fromEnv, toEnv Env) error {
+	return chain.second.ExtractInfo(fromCtx, toCtx, fromEnv, toEnv)
 }
 
 /*

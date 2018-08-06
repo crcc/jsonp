@@ -1,4 +1,4 @@
-package lang
+package kernel
 
 import "github.com/crcc/jsonp/engine"
 

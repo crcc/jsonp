@@ -66,13 +66,21 @@ func (e *env) Extend(kvs map[string]Exp) Env {
 
 func (e *env) Protect() Env {
 	newNs := make(map[string]Exp, len(e.namespace))
-	for name, val := range e.namespace {
-		newNs[name] = val
+
+	curE := e
+	for curE != nil {
+		for name, val := range e.namespace {
+			_, ok := newNs[name]
+			if !ok {
+				newNs[name] = val
+			}
+		}
+		curE = curE.parent
 	}
 
 	return &env{
 		namespace: newNs,
-		parent:    e.parent,
+		parent:    e,
 	}
 }
 
