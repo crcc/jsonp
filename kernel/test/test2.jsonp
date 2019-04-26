@@ -1,0 +1,3 @@
+{"import": {"fact2": ["fact"], "fact": ["factRec"]}}
+
+["print", ["+", ["fact", 6], ["factRec", 5]]]

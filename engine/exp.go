@@ -25,6 +25,8 @@ const (
 
 	SuspendExp
 	DelayedExp
+
+	CustomValue
 )
 
 type Exp interface {
@@ -128,7 +130,7 @@ func (s String) Equal(v Exp) bool {
 }
 
 func (s String) String() string {
-	return string(s)
+	return fmt.Sprintf("%q", string(s))
 }
 
 func NewString(s string) String {

@@ -3,9 +3,6 @@ package kernel
 import (
 	"errors"
 	"fmt"
-	"io"
-	"os"
-	"strings"
 
 	"github.com/crcc/jsonp/engine"
 )
@@ -13,6 +10,46 @@ import (
 var (
 	ErrUninitializedValue = errors.New("Uninitialized Value")
 )
+
+// type Evaluator interface {
+// 	Eval(exp Exp, level EvalLevel) (Exp, error)
+// 	LoadModule(name string) (*Module, error)
+// }
+
+// func NewEvaluator(loader ModuleLoader) Evaluator {
+// 	return &evaluator{
+// 		interp:       KernelInterpreter,
+// 		moduleLoader: loader,
+// 	}
+// }
+
+// type evaluator struct {
+// 	interp       engine.Interpreter
+// 	moduleLoader ModuleLoader
+// }
+
+// func (e *evaluator) Eval(exp Exp, level EvalLevel) (Exp, error) {
+// 	ctx := engine.NewContext(map[string]interface{}{
+// 		EvalLevelKey:    level,
+// 		ModuleLoaderKey: e.moduleLoader,
+// 	})
+
+// 	var env Env
+// 	if level == ModuleLevel {
+// 		env = engine.NewEnv(nil)
+// 	} else {
+// 		env = engine.NewEnv(preludeModule.ExportValues).Protect()
+// 	}
+// 	return e.interp.Interpret(ctx, exp, env)
+// }
+
+// func (e *evaluator) LoadModule(name string) (*Module, error) {
+// 	ctx := engine.NewContext(map[string]interface{}{
+// 		EvalLevelKey:    ModuleLevel,
+// 		ModuleLoaderKey: e.moduleLoader,
+// 	})
+// 	return e.moduleLoader.LoadModule(ctx, e.interp, name)
+// }
 
 func NewKernelInterpreter() engine.Interpreter {
 	interp := engine.NewNormalOrderInterpreter(false)
@@ -24,12 +61,17 @@ func NewKernelInterpreter() engine.Interpreter {
 	interp.RegisterInterpreter("begin", engine.RedexInterpreterFunc(beginRedexIntepret))
 	interp.RegisterInterpreter("if", engine.RedexInterpreterFunc(ifRedexIntepret))
 	interp.RegisterInterpreter("block", engine.RedexInterpreterFunc(blockRedexInterpret))
+	interp.RegisterInterpreter("module", engine.RedexInterpreterFunc(moduleRedexInterpret))
+	interp.RegisterInterpreter("import", engine.RedexInterpreterFunc(importRedexInterpret))
+	interp.RegisterInterpreter("export", engine.RedexInterpreterFunc(exportRedexInterpret))
 	return interp
 }
 
 // redex interpreter
 
 func varRedexInterpret(ctx Context, intrep Interpreter, exp Exp, env Env) (Exp, error) {
+	// check level: any level
+	// leaf exp
 	varName, err := engine.ToString(exp)
 	if err != nil {
 		return nil, err
@@ -54,6 +96,8 @@ func validVarName(name string) error {
 }
 
 func funcRedexInterpret(ctx Context, interp Interpreter, exp Exp, env Env) (Exp, error) {
+	// check level: any level
+	// leaf exp
 	// get args and body
 	l, err := engine.ToListExp(exp)
 	if err != nil {
@@ -98,6 +142,9 @@ func funcRedexInterpret(ctx Context, interp Interpreter, exp Exp, env Env) (Exp,
 }
 
 func applyRedexInterpret(ctx Context, interp Interpreter, exp Exp, env Env) (Exp, error) {
+	// check level: any level
+	// function and arguments evaluated in ExprLevel
+	// closure body evaluated in BlockLevel
 	l, err := engine.ToListExp(exp)
 	if err != nil {
 		return nil, err
@@ -107,7 +154,8 @@ func applyRedexInterpret(ctx Context, interp Interpreter, exp Exp, env Env) (Exp
 		return nil, errors.New("expect [func args ...]")
 	}
 
-	funcExp, err := interp.Interpret(ctx, l[0], env)
+	newCtx := EnsureEvalLevel(ctx, ExprLevel)
+	funcExp, err := interp.Interpret(newCtx, l[0], env)
 	if err != nil {
 		return nil, err
 	}
@@ -122,7 +170,7 @@ func applyRedexInterpret(ctx Context, interp Interpreter, exp Exp, env Env) (Exp
 
 		args := make([]Exp, len(argExps))
 		for i, argExp := range argExps {
-			arg, err := interp.Interpret(ctx, argExp, env)
+			arg, err := interp.Interpret(newCtx, argExp, env)
 			if err != nil {
 				return nil, err
 			}
@@ -139,12 +187,12 @@ func applyRedexInterpret(ctx Context, interp Interpreter, exp Exp, env Env) (Exp
 	}
 
 	if len(argExps) != len(clo.Args) {
-		return nil, errors.New(fmt.Sprintf("invalid arity. expect %d args", pri.Arity))
+		return nil, errors.New(fmt.Sprintf("invalid arity. expect %d args", len(clo.Args)))
 	}
 
 	kvs := make(map[string]Exp, len(clo.Args))
 	for i, argExp := range argExps {
-		arg, err := interp.Interpret(ctx, argExp, env)
+		arg, err := interp.Interpret(newCtx, argExp, env)
 		if err != nil {
 			return nil, err
 		}
@@ -152,11 +200,20 @@ func applyRedexInterpret(ctx Context, interp Interpreter, exp Exp, env Env) (Exp
 		kvs[clo.Args[i]] = arg
 	}
 
+	newCtx = EnsureEvalLevel(ctx, BlockLevel)
 	newEnv := clo.Env.Extend(kvs)
-	return engine.NewDelayedExp(ctx, clo.Body, newEnv), nil
+	return engine.NewDelayedExp(newCtx, clo.Body, newEnv), nil
 }
 
 func defRedexInterpret(ctx Context, interp Interpreter, exp Exp, env Env) (Exp, error) {
+	// check level
+	level := GetEvalLevel(ctx)
+	if level == ExprLevel {
+		return nil, fmt.Errorf("cannot evaluate def in %s", level.String())
+	}
+	// exps evaluated in ExprLevel
+
+	// get body
 	m, err := engine.ToMapExp(exp)
 	if err != nil {
 		return nil, err
@@ -166,9 +223,10 @@ func defRedexInterpret(ctx Context, interp Interpreter, exp Exp, env Env) (Exp, 
 		env.Define(name, NewUninitializedValue())
 	}
 
+	newCtx := EnsureEvalLevel(ctx, ExprLevel)
 	vals := make(map[string]Exp, len(m))
 	for name, subExp := range m {
-		val, err := interp.Interpret(ctx, subExp, env)
+		val, err := interp.Interpret(newCtx, subExp, env)
 		if err != nil {
 			return nil, err
 		}
@@ -184,14 +242,18 @@ func defRedexInterpret(ctx Context, interp Interpreter, exp Exp, env Env) (Exp, 
 }
 
 func setRedexInterpret(ctx Context, interp Interpreter, exp Exp, env Env) (Exp, error) {
+	// check level: any level
+	// exps evaluated in ExprLevel
+	// get body
 	m, err := engine.ToMapExp(exp)
 	if err != nil {
 		return nil, err
 	}
 
+	newCtx := EnsureEvalLevel(ctx, ExprLevel)
 	vals := make(map[string]Exp, len(m))
 	for name, subExp := range m {
-		val, err := interp.Interpret(ctx, subExp, env)
+		val, err := interp.Interpret(newCtx, subExp, env)
 		if err != nil {
 			return nil, err
 		}
@@ -207,6 +269,9 @@ func setRedexInterpret(ctx Context, interp Interpreter, exp Exp, env Env) (Exp, 
 }
 
 func beginRedexIntepret(ctx Context, interp Interpreter, exp Exp, env Env) (Exp, error) {
+	// check level: any level
+	// passing level
+	// get body
 	l, err := engine.ToListExp(exp)
 	if err != nil {
 		return nil, err
@@ -228,6 +293,9 @@ func beginRedexIntepret(ctx Context, interp Interpreter, exp Exp, env Env) (Exp,
 }
 
 func ifRedexIntepret(ctx Context, interp Interpreter, exp Exp, env Env) (Exp, error) {
+	// check level: any level
+	// test, then, else evaluated in ExprLevel
+	// get body
 	l, err := engine.ToListExp(exp)
 	if err != nil {
 		return nil, err
@@ -237,7 +305,8 @@ func ifRedexIntepret(ctx Context, interp Interpreter, exp Exp, env Env) (Exp, er
 		return nil, errors.New("expect [test then else]")
 	}
 
-	testResult, err := interp.Interpret(ctx, l[0], env)
+	newCtx := EnsureEvalLevel(ctx, ExprLevel)
+	testResult, err := interp.Interpret(newCtx, l[0], env)
 	if err != nil {
 		return nil, err
 	}
@@ -248,30 +317,25 @@ func ifRedexIntepret(ctx Context, interp Interpreter, exp Exp, env Env) (Exp, er
 	}
 
 	if res {
-		return engine.NewDelayedExp(ctx, l[1], env), nil
+		return engine.NewDelayedExp(newCtx, l[1], env), nil
 	}
-	return engine.NewDelayedExp(ctx, l[2], env), nil
+	return engine.NewDelayedExp(newCtx, l[2], env), nil
 }
 
 func blockRedexInterpret(ctx Context, interp Interpreter, exp Exp, env Env) (Exp, error) {
+	// check level: any level
+	// body evaluated in BlockLevel
+	newCtx := EnsureEvalLevel(ctx, BlockLevel)
 	newEnv := env.Extend(nil)
-	return engine.NewDelayedExp(ctx, exp, newEnv), nil
+	return engine.NewDelayedExp(newCtx, exp, newEnv), nil
 }
 
 // module
-type moduleInfo struct {
-	name         string
-	filename     string
-	exportValues map[string]Exp
-	loaded       bool
-}
 
 const (
-	FindPathsKey   = "find-paths"
-	EvalLevelKey   = "evaluate-level"
-	ModuleTableKey = "module-table"
-	ImportingKey   = "importing"
-	ExportNamesKey = "export-names"
+	ModuleLoaderKey  = "module-loader"
+	EvalLevelKey     = "evaluate-level"
+	CurrentModuleKey = "current-module"
 )
 
 type EvalLevel uint8
@@ -306,51 +370,30 @@ func GetEvalLevel(ctx Context) EvalLevel {
 	return level.(EvalLevel)
 }
 
-func GetImporting(ctx Context) bool {
-	v := ctx.Get(ImportingKey)
-	if v == nil {
-		return true
+func EnsureEvalLevel(ctx Context, level EvalLevel) Context {
+	l := GetEvalLevel(ctx)
+	if level != l {
+		return ctx.NewChild(map[string]interface{}{
+			EvalLevelKey: level,
+		})
 	}
-	return v.(bool)
+	return ctx
 }
 
-func GetModuleTable(ctx Context) map[string]*moduleInfo {
-	v := ctx.Get(ModuleTableKey)
-	if v == nil {
-		mt := map[string]*moduleInfo{
-			preludeModule.name: preludeModule,
-		}
-		ctx.Top().Set(ModuleTableKey, mt)
-		return mt
-	}
-	return v.(map[string]*moduleInfo)
-}
-
-func GetFindPaths(ctx Context) []string {
-	v := ctx.Get(FindPathsKey)
+func GetModuleLoader(ctx Context) ModuleLoader {
+	v := ctx.Get(ModuleLoaderKey)
 	if v == nil {
 		return nil
 	}
-	return v.([]string)
+	return v.(ModuleLoader)
 }
 
-func GetPreludeEnv(ctx Context) (Env, error) {
-	mt := GetModuleTable(ctx)
-	preludeModule := mt["prelude"]
-	if preludeModule == nil && preludeModule.loaded == false {
-		return nil, fmt.Errorf("missing prelude module or invalid prelude module")
-	}
-	return engine.NewEnv(preludeModule.exportValues).Protect(), nil
-}
-
-func GetExportNames(ctx Context) map[string]string {
-	v := ctx.Get(ExportNamesKey)
+func GetCurrentModule(ctx Context) *Module {
+	v := ctx.Get(CurrentModuleKey)
 	if v == nil {
-		names := map[string]string{}
-		ctx.Top().Set(ExportNamesKey, names)
-		return names
+		return nil
 	}
-	return v.(map[string]string)
+	return v.(*Module)
 }
 
 func isImport(exp Exp) bool {
@@ -395,6 +438,7 @@ func moduleRedexInterpret(ctx Context, interp Interpreter, exp Exp, env Env) (Ex
 	if level != ModuleLevel {
 		return nil, fmt.Errorf("cannot evaluate module in %s", level.String())
 	}
+	// body evaluated in ModuleLevel
 
 	// get content
 	m, err := engine.ToMapExp(exp)
@@ -405,28 +449,30 @@ func moduleRedexInterpret(ctx Context, interp Interpreter, exp Exp, env Env) (Ex
 	if len(m) != 3 {
 		return nil, fmt.Errorf("invalid module redex: %v", m)
 	}
-	// create moduleInfo
+	// create module
 	moduleName, err := getStringValue(m, "name")
 	if err != nil {
 		return nil, err
 	}
 	mt := GetModuleTable(ctx)
-	if m, ok := mt[moduleName]; ok {
-		if m.loaded {
-			return engine.NewNull(), nil
-		}
-		return nil, fmt.Errorf("error: circular loading module %q", moduleName)
+	if _, ok := mt[moduleName]; ok {
+		return nil, fmt.Errorf("module %s is loading or loaded, should not evaluate module again", moduleName)
 	}
+
 	moduleFile, err := getStringValue(m, "file")
 	if err != nil {
 		return nil, err
 	}
-	module := &moduleInfo{
-		name:     moduleName,
-		filename: moduleFile,
-		loaded:   false,
+	importValues, err := GetInitImportValues(ctx)
+	if err != nil {
+		return nil, err
 	}
+
+	// init context
+	module := NewModule(moduleName, moduleFile, importValues)
+	state := module.LoadingState()
 	mt[moduleName] = module
+	ctx.Set(CurrentModuleKey, module)
 
 	// get module body
 	body, ok := m["body"]
@@ -439,11 +485,12 @@ func moduleRedexInterpret(ctx Context, interp Interpreter, exp Exp, env Env) (Ex
 	}
 
 	// evaluate module
-	importing := true
 	for _, subExp := range l {
-		if importing && !isImport(subExp) {
-			importing = false
-			ctx.Set(ImportingKey, false)
+		if state.ImportingStage && !isImport(subExp) {
+			state.ImportingStage = false
+			for name, importVal := range module.ImportValues {
+				env.Define(name, importVal.Value)
+			}
 		}
 		_, err := interp.Interpret(ctx, subExp, env)
 		if err != nil {
@@ -452,117 +499,113 @@ func moduleRedexInterpret(ctx Context, interp Interpreter, exp Exp, env Env) (Ex
 	}
 
 	// export names
-	names := GetExportNames(ctx)
-	module.exportValues = make(map[string]Exp, len(names))
+	names := state.ExportNames
+	module.ExportValues = make(map[string]Exp, len(names))
 	for name, defName := range names {
 		val, err := env.Get(defName)
 		if err != nil {
 			return nil, err
 		}
-		module.exportValues[name] = val
+		module.ExportValues[name] = val
 	}
-	module.loaded = true
+	module.FinishLoading()
 
 	return engine.NewNull(), nil
 }
 
-func LoadModule(ctx Context, findPaths []string, moduleName string, parser engine.Parser) (string, Exp, error) {
-	parts := strings.Split(moduleName, "/")
-	if len(parts) == 0 || parts[0] == "" || parts[len(parts)-1] == "" {
-		return "", nil, fmt.Errorf("invalid module name")
-	}
-	modulePath := strings.Join(parts, string(os.PathSeparator))
+// import
 
-	name := moduleName
-	var filename string
-	for _, path := range findPaths {
-		// try find file
-		fileInfo, err := os.Stat(path + modulePath + ".jsonp")
-		if err != nil {
-			// try find directory
-			fileInfo, err = os.Stat(path + modulePath + string(os.PathSeparator) + "main.jsonp")
-			if err != nil {
-				continue
-			}
-		} else if parts[len(parts)-1] == "main" {
-			name = strings.Join(parts[:len(parts)-1], "/")
-		}
-
-		filename = fileInfo.Name()
-
-		file, err := os.Open(filename)
-		if err != nil {
-			return "", nil, err
-		}
-
-		var l []Exp
-		for err = nil; err == nil; {
-			exp, err := parser.Parse(ctx, file)
-			if err != nil {
-				l = append(l, exp)
-			}
-		}
-		if err == io.EOF {
-			return name, engine.NewRedex("module", engine.NewMapExp(
-				map[string]Exp{
-					"name": engine.NewString(name),
-					"file": engine.NewString(filename),
-					"body": engine.NewListExp(l),
-				})), nil
-		}
-
-		return "", nil, err
-	}
-
-	return "", nil, fmt.Errorf("cannot find module %s in paths: %v", moduleName, findPaths)
+type importName struct {
+	name     string
+	explicit bool
 }
 
-func toNameMap(specExp Exp) (map[string]string, error) {
-	l, err := engine.ToListExp(specExp)
+func importSpecToNameMap(importSpecExp Exp) (map[string]*importName, error) {
+	l, err := engine.ToListExp(importSpecExp)
 	if err != nil {
 		return nil, err
 	}
 
-	result := make(map[string]string, len(l))
+	result := make(map[string]*importName, len(l))
 	for _, subExp := range l {
-		switch subExp.Kind() {
-		case engine.StringValue:
-			s, err := engine.ToString(subExp)
+		l, err := engine.ToListExp(subExp)
+		if err != nil {
+			return nil, err
+		}
+		var (
+			name     string
+			alias    string
+			explicit bool
+		)
+		switch len(l) {
+		case 2:
+			name, err = engine.ToString(l[0])
 			if err != nil {
 				return nil, err
 			}
-			result[s] = s
-		case engine.ListExp:
-			l, err := engine.ToListExp(subExp)
+			alias = name
+			explicit, err = engine.ToBoolean(l[1])
 			if err != nil {
 				return nil, err
 			}
-			if len(l) != 2 {
-				return nil, fmt.Errorf("expect [name alias]")
-			}
-			name, err := engine.ToString(l[0])
+		case 3:
+			name, err = engine.ToString(l[0])
 			if err != nil {
 				return nil, err
 			}
-			alias, err := engine.ToString(l[1])
+			alias, err = engine.ToString(l[1])
 			if err != nil {
 				return nil, err
 			}
-			result[name] = alias
+			explicit, err = engine.ToBoolean(l[2])
+			if err != nil {
+				return nil, err
+			}
+		default:
+			return nil, fmt.Errorf("expect [name explicit] or [name alias exlicit]")
+		}
+		result[name] = &importName{
+			name:     alias,
+			explicit: explicit,
 		}
 	}
 	return result, nil
+}
+
+func importValue(importValues map[string]*ImportVal, moduleName string, importName *importName, val Exp) error {
+	ival, ok := importValues[importName.name]
+	if ok {
+		if ival.Explicit {
+			if importName.explicit {
+				return fmt.Errorf("conflict import name: %q, when loading %s", importName.name, moduleName)
+			}
+		} else {
+			if importName.explicit {
+				ival.Value = val
+				ival.Explicit = true
+			} else {
+				ival.Value = NewAmbiguousValue()
+			}
+		}
+	} else {
+		importValues[importName.name] = &ImportVal{
+			Value:    val,
+			Explicit: importName.explicit,
+		}
+	}
+	return nil
 }
 
 func importRedexInterpret(ctx Context, interp Interpreter, exp Exp, env Env) (Exp, error) {
 	// check level
 	level := GetEvalLevel(ctx)
 	if level != ModuleLevel && level != TopLevel {
-		return nil, fmt.Errorf("cannot evaluate module in %s", level.String())
+		return nil, fmt.Errorf("cannot evaluate import in %s", level.String())
 	}
 
 	// check importing
-	if level == ModuleLevel && !GetImporting(ctx) {
+	curModule := GetCurrentModule(ctx)
+	if level == ModuleLevel && !curModule.LoadingState().ImportingStage {
 		return nil, fmt.Errorf("import statment must at the start of the module")
 	}
 
@@ -576,62 +619,120 @@ func importRedexInterpret(ctx Context, interp Interpreter, exp Exp, env Env) (Ex
 	}
 
 	// find module
-	findPaths := GetFindPaths(ctx)
-	if len(findPaths) == 0 {
-		return nil, fmt.Errorf("empty find paths")
+	loader := GetModuleLoader(ctx)
+	if loader == nil {
+		return nil, fmt.Errorf("missing module loader")
 	}
 
-	for name, specExp := range m {
-		nameMap, err := toNameMap(specExp)
+	for name, importSpecExp := range m {
+		nameMap, err := importSpecToNameMap(importSpecExp)
 		if err != nil {
 			return nil, err
 		}
 
-		newCtx := ctx.Protect()
-		moduleName, exp, err := LoadModule(newCtx, findPaths, name, engine.ParserFunc(ParseJson))
+		module, err := loader.LoadModule(ctx, interp, name)
 		if err != nil {
 			return nil, err
 		}
 
-		newCtx = ctx.NewChild(map[string]interface{}{
-			EvalLevelKey: ModuleLevel,
-		})
-		newEnv, err := GetPreludeEnv(ctx)
-		if err != nil {
-			return nil, err
-		}
-		if _, err := interp.Interpret(newCtx, exp, newEnv); err != nil {
-			return nil, err
-		}
-
-		mt := GetModuleTable(ctx)
-		module := mt[moduleName]
-		for name, alias := range nameMap {
-			val := module.exportValues[name]
+		// install values
+		for name, importName := range nameMap {
+			val := module.ExportValues[name]
 			if val == nil {
-				return nil, fmt.Errorf("cannot import %s, no such name in module: %q", name, moduleName)
+				return nil, fmt.Errorf("cannot import %s, no such name in module: %q", name, module.Name)
 			}
-			// TODO
-			var _ = alias
-			env.Define(name, val)
+
+			if level == TopLevel {
+				env.Define(importName.name, val)
+			} else {
+				err := importValue(curModule.ImportValues, module.Name, importName, val)
+				if err != nil {
+					return nil, err
+				}
+			}
 		}
 	}
 
 	return engine.NewNull(), nil
 }
 
+// export
+
+func exportRedexInterpret(ctx Context, interp Interpreter, exp Exp, env Env) (Exp, error) {
+	// check level
+	level := GetEvalLevel(ctx)
+	if level != ModuleLevel {
+		return nil, fmt.Errorf("cannot evaluate export in %s", level.String())
+	}
+
+	// get body
+	l, err := engine.ToListExp(exp)
+	if err != nil {
+		return nil, err
+	}
+	if len(l) == 0 {
+		return nil, fmt.Errorf("empty export body")
+	}
+
+	// collecting exportNames
+	curModule := GetCurrentModule(ctx)
+	names := curModule.LoadingState().ExportNames
+	for _, subExp := range l {
+		err := addExportNameToNameMap(subExp, names)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	return engine.NewNull(), nil
+}
+
+func addExportNameToNameMap(subExp Exp, names map[string]string) error {
+	switch subExp.Kind() {
+	case engine.StringValue:
+		s, err := engine.ToString(subExp)
+		if err != nil {
+			return err
+		}
+		if _, ok := names[s]; ok {
+			return fmt.Errorf("conflict export name: %s", s)
+		}
+		names[s] = s
+	case engine.ListExp:
+		l, err := engine.ToListExp(subExp)
+		if err != nil {
+			return err
+		}
+		if len(l) != 2 {
+			return fmt.Errorf("expect [name alias]")
+		}
+		name, err := engine.ToString(l[0])
+		if err != nil {
+			return err
+		}
+		alias, err := engine.ToString(l[1])
+		if err != nil {
+			return err
+		}
+		if _, ok := names[alias]; ok {
+			return fmt.Errorf("conflict export name: %s", alias)
+		}
+		names[alias] = name
+	default:
+		return fmt.Errorf("invalid export spec: %s", subExp.String())
+	}
+	return nil
+}
+
 // init
 var (
-	KernelInterpreter engine.Interpreter
-	preludeModule     *moduleInfo
+	preludeModule *Module
 )
 
 func init() {
-	KernelInterpreter = NewKernelInterpreter()
-	preludeModule = &moduleInfo{
-		name:   "prelude",
-		loaded: true,
-		exportValues: map[string]Exp{
+	preludeModule = &Module{
+		Name: "prelude",
+		ExportValues: map[string]Exp{
 			"+": NewPrimitive(2, func(vals []Exp) (Exp, error) {
 				n1, err := engine.ToNumber(vals[0])
 				if err != nil {
@@ -749,13 +850,24 @@ func init() {
 
 				return engine.NewBoolean(n1 == n2), nil
 			}),
-			"printString": NewPrimitive(1, func(vals []Exp) (Exp, error) {
-				s, err := engine.ToString(vals[0])
+			"equal": NewPrimitive(2, func(vals []Exp) (Exp, error) {
+				return engine.NewBoolean(vals[0].Equal(vals[1])), nil
+			}),
+			"append-string": NewPrimitive(2, func(vals []Exp) (Exp, error) {
+				s1, err := engine.ToString(vals[0])
 				if err != nil {
 					return nil, err
 				}
 
-				println(s)
+				s2, err := engine.ToString(vals[1])
+				if err != nil {
+					return nil, err
+				}
+
+				return engine.NewString(s1 + s2), nil
+			}),
+			"print": NewPrimitive(1, func(vals []Exp) (Exp, error) {
+				fmt.Println(vals[0].String())
 
 				return engine.NewNull(), nil
 			}),

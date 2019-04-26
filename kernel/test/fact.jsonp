@@ -1,0 +1,15 @@
+{"export": ["factRec", "factIter"]}
+
+{"def": {
+	"factRec": {"func": [["n"],
+		{"if": [["<=", "n", 0],
+				1,
+				["*", "n", ["factRec", ["-", "n", 1]]]]}
+	]},
+	"factIter": {"func": [["n", "a"],
+		{"if": [["<=", "n", 0],
+				"a",
+				["factIter", ["-", "n", 1], ["*", "n", "a"]]]}
+	]}
+}}
+			

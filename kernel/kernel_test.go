@@ -1,15 +1,78 @@
 package kernel
 
 import (
+	"os"
+	"strings"
 	"testing"
 
 	"github.com/crcc/jsonp/engine"
 )
 
+var (
+	evalS *Repl
+	evalF *Repl
+)
+
+func init() {
+	loaderS := &SimpleModuleLoader{
+		Modules: map[string]Exp{
+			"fact": mustNewModule("fact", `
+			{"def": {
+				"factRec": {"func": [["n"],
+						   {"if": [["<=", "n", 0],
+								   1,
+								   ["*", "n", ["factRec", ["-", "n", 1]]]]}
+					]},
+				"factIter": {"func": [["n", "a"],
+					{"if": [["<=", "n", 0],
+							"a",
+							["factIter", ["-", "n", 1], ["*", "n", "a"]]]}
+					]}
+			}}
+			
+			{"export": ["factRec", "factIter"]}`),
+			"fact2": mustNewModule("fact2", `
+			{"import": {"fact": ["factIter"]}}
+
+			{"def": {"fact": {"func": [["n"], ["factIter", "n", 1]]}}}
+
+			{"export": ["fact"]}`),
+			"main": mustNewModule("main", `
+				{"import": {"fact2": ["fact"]}}
+				["print", ["fact", 6]]
+			`),
+			"main2": mustNewModule("main2", `
+				{"import": {"fact2": ["fact"], "fact": ["factRec"]}}
+				["print", ["+", ["fact", 6], ["factRec", 5]]]
+			`),
+		},
+	}
+	interp := NewKernelInterpreter()
+	evalS = NewRepl(engine.ParserFunc(ParseJson), interp, loaderS)
+
+	dir, err := os.Getwd()
+	if err != nil {
+		panic(err.Error())
+	}
+	loaderF := NewFileModuleLoader([]string{dir + string(os.PathSeparator) + "test"},
+		engine.ParserFunc(ParseJsonModule))
+	evalF = NewRepl(engine.ParserFunc(ParseJson), interp, loaderF)
+}
+
+func mustNewModule(name string, jsonStr string) Exp {
+	ctx := engine.NewContext(map[string]interface{}{
+		"module-name": name,
+	})
+	m, err := ParseJsonModule(ctx, strings.NewReader(jsonStr))
+	if err != nil {
+		panic(err.Error())
+	}
+
+	return m
+}
+
 func interp(exp Exp) (Exp, error) {
-	ctx := engine.NewContext(nil)
-	env := engine.NewEnv(preludeModule.exportValues).Protect()
-	return KernelInterpreter.Interpret(ctx, exp, env)
+	return evalS.EvalInteractive(exp)
 }
 
 func mustParse(s string) Exp {
@@ -67,11 +130,12 @@ func TestInterpret_FactIter(t *testing.T) {
 }
 
 func TestInterpret_LoopForever(t *testing.T) {
+	t.Skip("loop forever, ignore it")
 	jsonStr := `
 	{"begin": [
 		{"def": {
 		  "loop": {"func": [[],
-					 ["printString", {"data": "hello!"}],
+					 ["print", {"data": "hello!"}],
 					 ["loop"]]}
 		}},
 		["loop"]
@@ -83,4 +147,96 @@ func TestInterpret_LoopForever(t *testing.T) {
 
 	t.Log(err)
 	t.Log(val)
+}
+
+func TestModule_Simple_TopLevel(t *testing.T) {
+	e, err := parse(`{"begin": [
+		{"import": {"fact2": ["fact"]}},
+		["fact", 6]
+	]}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	val, err := evalS.EvalInteractive(e)
+	if err != nil {
+		t.Fatal(err.Error())
+	}
+	if !engine.NewNumber(720).Equal(val) {
+		t.Fatalf("expect 720")
+	}
+
+	e2, err := parse(`{"begin": [
+		{"import": {"fact2": ["fact"], "fact": ["factRec"]}},
+		["+", ["fact", 6], ["factRec", 5]]
+	]}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	val, err = evalS.EvalInteractive(e2)
+	if err != nil {
+		t.Fatal(err.Error())
+	}
+	if !engine.NewNumber(840).Equal(val) {
+		t.Fatalf("expect 840")
+	}
+}
+
+func TestModule_Simple_ModuleLevel(t *testing.T) {
+	err := evalS.EvalBatch("main")
+	if err != nil {
+		t.Fatal(err.Error())
+	}
+
+	err = evalS.EvalBatch("main2")
+	if err != nil {
+		t.Fatal(err.Error())
+	}
+}
+
+func TestModule_File_TopLevel(t *testing.T) {
+	e, err := parse(`{"begin": [
+		{"import": {"fact2": ["fact"]}},
+		["fact", 6]
+	]}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	val, err := evalF.EvalInteractive(e)
+	if err != nil {
+		t.Fatal(err.Error())
+	}
+	if !engine.NewNumber(720).Equal(val) {
+		t.Fatalf("expect 720")
+	}
+
+	e2, err := parse(`{"begin": [
+		{"import": {"fact2": ["fact"], "fact": ["factRec"]}},
+		["+", ["fact", 6], ["factRec", 5]]
+	]}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	val, err = evalS.EvalInteractive(e2)
+	if err != nil {
+		t.Fatal(err.Error())
+	}
+	if !engine.NewNumber(840).Equal(val) {
+		t.Fatalf("expect 840")
+	}
+}
+
+func TestModule_File_ModuleLevel(t *testing.T) {
+	err := evalF.EvalBatch("test")
+	if err != nil {
+		t.Fatal(err.Error())
+	}
+
+	err = evalF.EvalBatch("test2")
+	if err != nil {
+		t.Fatal(err.Error())
+	}
 }

@@ -1,0 +1,5 @@
+{"import": {"fact": ["factIter"]}}
+
+{"export": ["fact"]}
+
+{"def": {"fact": {"func": [["n"], ["factIter", "n", 1]]}}}

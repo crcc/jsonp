@@ -2,7 +2,8 @@ package engine
 
 import (
 	"errors"
-	"fmt"
+
+	"github.com/golang/glog"
 )
 
 var (
@@ -14,10 +15,10 @@ type InfoExtracter interface {
 	ExtractInfo(fromCtx, toCtx Context, fromEnv, toEnv Env) error
 }
 
-type InfoExtracterFunc func(ctx Context, env Env) (Context, Env, error)
+type InfoExtracterFunc func(fromCtx, toCtx Context, fromEnv, toEnv Env) error
 
-func (f InfoExtracterFunc) ExtractInfo(ctx Context, env Env) (Context, Env, error) {
-	return f(ctx, env)
+func (f InfoExtracterFunc) ExtractInfo(fromCtx, toCtx Context, fromEnv, toEnv Env) error {
+	return f(fromCtx, toCtx, fromEnv, toEnv)
 }
 
 type Interpreter interface {
@@ -191,13 +192,9 @@ func (interp *AbstractInterpreter) interpret(ctx Context, exp Exp, env Env) (Exp
 	e := exp
 	expanded := true
 	for expanded {
-		// fmt.Println("interpret", e)
+		glog.V(2).Infof("interpret %s", e)
 		var interpErr error
 		switch e.Kind() {
-		case NullValue, BooleanValue, NumberValue, StringValue,
-			ListValue, MapValue, SuspendValue:
-			return e, false, nil
-			// return interp.interpreter.Interpret(ctx, exp, env)
 		case MapExp:
 			m, err := ToMap(e)
 			if err != nil {
@@ -231,7 +228,9 @@ func (interp *AbstractInterpreter) interpret(ctx Context, exp Exp, env Env) (Exp
 			redexInterp := interp.redexInterpreters[r.Name]
 			e, expanded, interpErr = interp.redexEvaluator.InterpretRedex(redexInterp, interp.interpret, ctx, r, env)
 		default:
-			panic(fmt.Sprintf("unknown Exp Kind: %v, exp: %s", exp.Kind(), exp.String()))
+			// assume values
+			return e, false, nil
+			// return interp.interpreter.Interpret(ctx, exp, env)
 		}
 
 		if interpErr != nil {

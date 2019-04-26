@@ -9,9 +9,10 @@ import (
 
 //// Custom Value
 const (
-	ClosureValue engine.Kind = iota
-	UninitializedValue
-	PrimitiveFuncValue
+	ClosureValue       engine.Kind = engine.CustomValue
+	UninitializedValue engine.Kind = engine.CustomValue + 1
+	PrimitiveFuncValue engine.Kind = engine.CustomValue + 2
+	AmbiguousValue     engine.Kind = engine.CustomValue + 3
 )
 
 // Closure
@@ -118,4 +119,29 @@ func ToPrimitive(exp Exp) (PrimitiveFunc, error) {
 	}
 
 	return exp.(PrimitiveFunc), nil
+}
+
+// Ambiguous Value
+type AmbiguousVal struct{}
+
+func (u AmbiguousVal) Kind() engine.Kind {
+	return AmbiguousValue
+}
+
+func (u AmbiguousVal) Equal(v Exp) bool {
+	return v.Kind() == AmbiguousValue
+}
+
+func (u AmbiguousVal) String() string {
+	return `{"ambiguousValue": null}`
+}
+
+var ambiguousValue = AmbiguousVal{}
+
+func NewAmbiguousValue() AmbiguousVal {
+	return ambiguousValue
+}
+
+func IsAmbiguousValue(exp Exp) bool {
+	return exp.Kind() == AmbiguousValue
 }
